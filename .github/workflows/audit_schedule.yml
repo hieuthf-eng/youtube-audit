@@ -1,16 +1,13 @@
-name: YouTube Audit Auto Scan
+name: YouTube Link & EndScreen Auditor
 
 on:
   schedule:
-    # Cấu hình lịch chạy (Giờ quốc tế UTC)
-    # Ví dụ: Chạy vào 00:00 UTC (7h sáng VN) vào ngày thứ Hai hàng tuần
-    - cron: '0 0 * * 1'
-  workflow_dispatch: # Cho phép bấm nút chạy bằng tay để test
+    - cron: '0 8 * * *' # Chạy 0h sáng thứ 2 hàng tuần (Giờ UTC)
+  workflow_dispatch: # Cho phép bấm nút chạy tay để test
 
 jobs:
-  build:
+  audit:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -27,7 +24,6 @@ jobs:
 
       - name: Run Audit Script
         env:
-          # Các biến này sẽ lấy từ Secret của GitHub
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
