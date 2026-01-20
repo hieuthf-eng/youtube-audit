@@ -1,0 +1,36 @@
+name: YouTube Audit Auto Scan
+
+on:
+  schedule:
+    # Cấu hình lịch chạy (Giờ quốc tế UTC)
+    # Ví dụ: Chạy vào 00:00 UTC (7h sáng VN) vào ngày thứ Hai hàng tuần
+    - cron: '0 0 * * 1'
+  workflow_dispatch: # Cho phép bấm nút chạy bằng tay để test
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Audit Script
+        env:
+          # Các biến này sẽ lấy từ Secret của GitHub
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python main.py
