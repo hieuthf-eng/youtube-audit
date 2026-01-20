@@ -6,9 +6,11 @@ import smtplib
 import time
 import traceback
 import concurrent.futures
+import csv
+import io
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from email.mime.application import MIMEApplication  # <--- Thêm mới để xử lý file đính kèm
+from email.mime.application import MIMEApplication
 from googleapiclient.discovery import build
 
 # --- CẤU HÌNH ---
@@ -25,15 +27,20 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 youtube = build('youtube', 'v3', developerKey=API_KEY)
 
-# --- KHAI BÁO BIẾN LOG ---
-full_log_lines = []       # Lưu TẤT CẢ (để ghi ra file .txt đính kèm)
-email_error_lines = []    # Chỉ lưu LỖI (để hiện trong nội dung email)
+# --- KHAI BÁO BIẾN DỮ LIỆU BÁO CÁO (CSV) ---
+# Format: [Video_URL, Video_Title, Location, Found_Link, Status, Note]
+CSV_DATA = []
+# Header cho file CSV
+CSV_HEADER = ['Video URL', 'Tiêu đề Video', 'Vị trí (Mô tả/Cmt)', 'Link Tìm Thấy', 'Trạng Thái', 'Ghi Chú']
+
+# Biến để hiện trong Email Body (chỉ lỗi)
+email_error_lines = []
 
 # --- BIẾN TOÀN CỤC ĐỂ THỐNG KÊ ---
 STATS = {
     "videos_scanned": 0,
-    "total_occurrences": 0,
-    "unique_links_count": 0,
+    "total_links_found": 0,
+    "links_ok": 0,
     "links_error": 0,
     "endscreen_issues": 0
 }
@@ -50,18 +57,16 @@ USER_AGENTS = [
 WHITELIST_DOMAINS = ['facebook.com', 'fb.me', 'twitter.com', 'x.com', 'linkedin.com', 'instagram.com', 'tiktok.com', 't.me', 'zalo.me', 'youtube.com', 'youtu.be', 'google.com']
 TRACKING_KEYWORDS = ['pipaffiliates', 'affiliate', 'clicks.', 'track.', 'go.', 'bit.ly', 'tinyurl', 'ref=', 'click', 'partner', 'redirect']
 
-def log(message, is_error=False, is_summary=False):
-    """
-    Hàm log thông minh:
-    - Luôn in ra màn hình (Console)
-    - Luôn lưu vào full_log_lines (File đính kèm)
-    - Chỉ lưu vào email_error_lines nếu đó là Lỗi hoặc Tổng kết
-    """
+def log(message):
     print(message, flush=True)
-    full_log_lines.append(message)
+
+def add_to_report(video_url, video_title, location, found_link, status, note=""):
+    """Thêm 1 dòng vào báo cáo CSV"""
+    CSV_DATA.append([video_url, video_title, location, found_link, status, note])
     
-    if is_error or is_summary:
-        email_error_lines.append(message)
+    # Nếu là lỗi, thêm vào nội dung email body để cảnh báo nhanh
+    if status == "ERROR":
+        email_error_lines.append(f"[{location}] {found_link} -> {note}")
 
 def parse_duration(duration_str):
     match = re.match(r'PT(\d+H)?(\d+M)?(\d+S)?', duration_str)
@@ -71,19 +76,18 @@ def parse_duration(duration_str):
     seconds = int(match.group(3)[:-1]) if match.group(3) else 0
     return (hours * 3600) + (minutes * 60) + seconds
 
-# --- MODULE 1: CHECK LINK WEBSITE (CÓ CACHE) ---
+# --- MODULE 1: CHECK LINK WEBSITE (TRẢ VỀ KẾT QUẢ CHI TIẾT) ---
 def is_whitelist_domain(url):
     for domain in WHITELIST_DOMAINS:
         if domain in url: return True
     return False
 
-def is_tracking_link(url):
-    for kw in TRACKING_KEYWORDS:
-        if kw in url: return True
-    return False
-
-def check_single_link(url):
-    if any(d in url for d in ['youtube.com', 'youtu.be', 'google.com']): return "INTERNAL"
+def check_single_link_detailed(url):
+    """
+    Trả về: (Status_Type, Message)
+    Status_Type: 'OK' hoặc 'ERROR'
+    """
+    if any(d in url for d in ['youtube.com', 'youtu.be', 'google.com']): return "INTERNAL", "Link nội bộ"
     
     if url in LINK_CACHE: return LINK_CACHE[url]
 
@@ -95,7 +99,7 @@ def check_single_link(url):
         'Upgrade-Insecure-Requests': '1'
     }
     
-    result = None 
+    result = ("OK", "200 OK") 
     try:
         response = requests.get(url, headers=headers, timeout=10, verify=False, stream=True)
         content_snippet = ""
@@ -108,62 +112,72 @@ def check_single_link(url):
         code = response.status_code
         has_title = '<title' in content_snippet.lower()
 
-        if 200 <= code < 400: result = None
+        if 200 <= code < 400: 
+            result = ("OK", f"{code} OK")
         elif code in [400, 403, 406, 429, 503, 999, 401]:
-            if is_whitelist_domain(url) or has_title: result = None
-            else: result = f"DEAD ({code} - Blocked/No Title) - {url}"
-        elif code in [404, 410]: result = f"DEAD ({code} - Not Found) - {url}"
-        else: result = f"WARNING ({code}) - {url}"
+            if is_whitelist_domain(url) or has_title: 
+                result = ("OK", f"{code} (Anti-Bot but OK)")
+            else: 
+                result = ("ERROR", f"DEAD ({code} - Blocked)")
+        elif code in [404, 410]: 
+            result = ("ERROR", f"DEAD ({code} - Not Found)")
+        else: 
+            result = ("ERROR", f"WARNING ({code})")
             
     except requests.exceptions.RequestException:
-        if is_tracking_link(url): result = None
-        else: result = f"ERROR (Connection Failed) - {url}"
+        result = ("ERROR", "Connection Failed")
 
     LINK_CACHE[url] = result
     return result
 
-def audit_text_links_parallel(video_id, text, source_type):
-    if not text: return []
+def audit_text_links_parallel(video_id, video_title, text, source_type):
+    if not text: return
     urls = re.findall(r'(https?://\S+)', text)
     cleaned_urls = list(set([u.rstrip('.,;)"\'') for u in urls]))
+    
+    # Lọc link ngoài
     external_links = [u for u in cleaned_urls if not any(d in u for d in ['youtube.com', 'youtu.be', 'google.com'])]
 
-    if not external_links: return []
+    if not external_links: return
 
-    STATS["total_occurrences"] += len(external_links)
-    for u in external_links: UNIQUE_LINKS_SET.add(u)
+    video_full_url = f"https://youtu.be/{video_id}"
+    STATS["total_links_found"] += len(external_links)
     
-    # Chỉ log vào full log (console/file), KHÔNG log vào email body
-    log(f"   > [{source_type}] Phát hiện {len(external_links)} link ngoài. Đang kiểm tra...", is_error=False)
+    log(f"   > [{source_type}] Check {len(external_links)} links...")
 
-    issues = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_url = {executor.submit(check_single_link, url): url for url in external_links}
+        future_to_url = {executor.submit(check_single_link_detailed, url): url for url in external_links}
         for future in concurrent.futures.as_completed(future_to_url):
-            result = future.result()
-            if result and result != "INTERNAL":
-                issues.append(f"   [{source_type}] {result}")
-                
-    if issues:
-        STATS["links_error"] += len(issues)
-    
-    return issues
+            url = future_to_url[future]
+            status_type, msg = future.result()
+            
+            if status_type == "INTERNAL":
+                continue # Không ghi link nội bộ vào báo cáo để cho gọn
+            
+            # GHI VÀO FILE BÁO CÁO CSV
+            add_to_report(video_full_url, video_title, source_type, url, status_type, msg)
+            
+            if status_type == "ERROR":
+                STATS["links_error"] += 1
+            else:
+                STATS["links_ok"] += 1
 
 # --- MODULE 2: QUÉT MÀN HÌNH KẾT THÚC ---
-def audit_end_screens_smart(video_id):
+def audit_end_screens_smart(video_id, video_title):
     url = f"https://www.youtube.com/watch?v={video_id}"
-    issues = []
+    video_full_url = f"https://youtu.be/{video_id}"
+    
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         response = requests.get(url, headers=headers, timeout=10)
         html = response.text
         match = re.search(r'var ytInitialPlayerResponse\s*=\s*({.+?});', html)
-        if not match: return []
+        if not match: return
 
         try:
             data = json.loads(match.group(1))
             end_screen_elements = data['endscreen']['endScreenRenderer']['elements']
-        except: return []
+        except: return
 
         for el in end_screen_elements:
             try:
@@ -174,49 +188,48 @@ def audit_end_screens_smart(video_id):
                     renderer = el['endScreenVideoRenderer']
                     if 'videoId' in renderer:
                         target_id = renderer['videoId']
-                        element_type = "Video cụ thể"
+                        element_type = "Video"
                     else: continue 
                 elif 'endScreenPlaylistRenderer' in el:
                     renderer = el['endScreenPlaylistRenderer']
                     if 'playlistId' in renderer:
                         target_id = renderer['playlistId']
-                        element_type = "Danh sách phát"
+                        element_type = "Playlist"
 
                 if target_id:
-                    cache_key = f"YT_API_{target_id}"
-                    if cache_key in LINK_CACHE:
-                        api_result = LINK_CACHE[cache_key]
-                    else:
-                        api_result = "OK"
-                        if element_type == "Video cụ thể":
-                            check_vid = youtube.videos().list(id=target_id, part='status').execute()
-                            if not check_vid['items']: api_result = "DEAD"
-                        elif element_type == "Danh sách phát":
-                            check_pl = youtube.playlists().list(id=target_id, part='status').execute()
-                            if not check_pl['items']: api_result = "DEAD"
-                        LINK_CACHE[cache_key] = api_result
-
-                    if api_result == "DEAD":
-                        issues.append(f"   [Màn hình kết thúc] {element_type} BỊ XÓA: {target_id}")
+                    # Check API
+                    api_status = "OK"
+                    note = "Active"
+                    
+                    if element_type == "Video":
+                        check_vid = youtube.videos().list(id=target_id, part='status').execute()
+                        if not check_vid['items']: 
+                            api_status = "ERROR"
+                            note = f"Video {target_id} bị xóa/ẩn"
+                    elif element_type == "Playlist":
+                        check_pl = youtube.playlists().list(id=target_id, part='status').execute()
+                        if not check_pl['items']: 
+                            api_status = "ERROR"
+                            note = f"Playlist {target_id} bị xóa/ẩn"
+                    
+                    if api_status == "ERROR":
+                        add_to_report(video_full_url, video_title, "EndScreen", target_id, "ERROR", note)
                         STATS["endscreen_issues"] += 1
 
             except Exception: continue
     except Exception: pass
-    return issues
 
 # --- MODULE 0: QUÉT THÔNG TIN KÊNH ---
 def audit_channel_info(channel_id):
     log(">> Đang kiểm tra thông tin Kênh (About Section)...")
-    issues = []
     try:
         response = youtube.channels().list(id=channel_id, part='snippet').execute()
-        if not response['items']: return []
+        if not response['items']: return
         item = response['items'][0]
         description = item['snippet']['description']
-        issues.extend(audit_text_links_parallel("CHANNEL_HOME", description, "Mô tả Kênh"))
+        audit_text_links_parallel("CHANNEL_HOME", "Trang Chủ Kênh", description, "Mô tả Kênh")
     except Exception as e:
         log(f"Lỗi khi quét kênh: {e}")
-    return issues
 
 def get_long_videos(channel_id):
     long_videos = []
@@ -244,43 +257,52 @@ def get_long_videos(channel_id):
         log(f"Lỗi khi lấy danh sách video: {e}")
     return long_videos
 
-def send_email_report(total_issues_count, channel_name, crash_message=None):
+def send_email_with_csv(total_issues_count, channel_name, crash_message=None):
     msg = MIMEMultipart()
     msg['From'] = EMAIL_USER
     msg['To'] = EMAIL_TO
-    STATS['unique_links_count'] = len(UNIQUE_LINKS_SET)
-
-    # 1. TẠO FILE LOG ĐÍNH KÈM (.txt)
-    # Gom toàn bộ full_log_lines thành 1 chuỗi
-    full_log_content = "\n".join(full_log_lines)
+    
+    # 1. TẠO FILE CSV (Trong bộ nhớ)
+    # Dùng io.StringIO để ghi file CSV ảo
+    csv_buffer = io.StringIO()
+    csv_writer = csv.writer(csv_buffer)
+    # Ghi header
+    csv_writer.writerow(CSV_HEADER)
+    # Ghi dữ liệu
+    csv_writer.writerows(CSV_DATA)
+    
+    # Chuyển sang bytes để đính kèm (UTF-8 with BOM để mở Excel không lỗi font tiếng Việt)
+    csv_bytes = csv_buffer.getvalue().encode('utf-8-sig')
+    
     # Tạo attachment
-    attachment = MIMEApplication(full_log_content.encode('utf-8'), Name=f"Full_Audit_Log_{channel_name}.txt")
-    attachment['Content-Disposition'] = f'attachment; filename="Full_Audit_Log_{channel_name}.txt"'
+    filename = f"Bao_Cao_Kenh_{channel_name.replace(' ', '_')}.csv"
+    attachment = MIMEApplication(csv_bytes, Name=filename)
+    attachment['Content-Disposition'] = f'attachment; filename="{filename}"'
     msg.attach(attachment)
 
-    # 2. TẠO NỘI DUNG EMAIL (CHỈ HIỆN THỐNG KÊ + LỖI)
+    # 2. TẠO NỘI DUNG EMAIL
     summary_block = (
         f"=== THỐNG KÊ KÊNH: {channel_name} ===\n"
         f"- Tổng video đã quét: {STATS['videos_scanned']}\n"
-        f"- Link DUY NHẤT (Unique): {STATS['unique_links_count']} link\n"
-        f"  (Tổng số lần xuất hiện link: {STATS['total_occurrences']} lần)\n"
-        f"- Số lỗi phát hiện: {total_issues_count}\n"
+        f"- Tổng Link đã check: {STATS['total_links_found']}\n"
+        f"- Link Tốt (OK): {STATS['links_ok']}\n"
+        f"- Link Lỗi (ERROR): {STATS['links_error']}\n"
+        f"- Lỗi Màn hình kết thúc: {STATS['endscreen_issues']}\n"
         f"======================================\n\n"
     )
 
     if crash_message:
-        msg['Subject'] = f"[{channel_name}] ❌ LỖI NGHIÊM TRỌNG"
-        body_content = f"Hệ thống gặp lỗi:\n{crash_message}\n\n{summary_block}DANH SÁCH LỖI:\n" + "\n".join(email_error_lines)
+        msg['Subject'] = f"[{channel_name}] ❌ LỖI - Script dừng đột ngột"
+        body_content = f"Lỗi hệ thống:\n{crash_message}\n\n{summary_block}Vui lòng xem file CSV đính kèm để biết chi tiết những gì đã quét được."
     elif total_issues_count == 0:
-        msg['Subject'] = f"[{channel_name}] ✅ Kênh Sạch (Xem log đính kèm)"
-        body_content = f"{summary_block}Kênh hoạt động tốt.\nChi tiết quá trình quét vui lòng xem file đính kèm: Full_Audit_Log_{channel_name}.txt"
+        msg['Subject'] = f"[{channel_name}] ✅ Kênh Sạch - Xem báo cáo Excel"
+        body_content = f"{summary_block}Hệ thống không phát hiện link hỏng nào.\nChi tiết toàn bộ link trên kênh vui lòng xem file Excel đính kèm."
         log("✅ Đang gửi email báo cáo (Kênh sạch)...")
     else:
-        msg['Subject'] = f"[{channel_name}] ⚠️ CẢNH BÁO - {total_issues_count} lỗi"
-        # Chỉ hiển thị danh sách lỗi trong body, không hiện các dòng "Scanning..."
-        body_content = f"{summary_block}Dưới đây là danh sách các lỗi cần xử lý:\n\n" + "\n".join(email_error_lines) + \
-                       f"\n\n--- HẾT BÁO CÁO ---\nChi tiết đầy đủ xem file đính kèm."
-        log("⚠️ Đang gửi email cảnh báo lỗi...", is_error=True)
+        msg['Subject'] = f"[{channel_name}] ⚠️ CẢNH BÁO - {total_issues_count} link hỏng"
+        body_content = f"{summary_block}Dưới đây là tóm tắt các link lỗi:\n\n" + "\n".join(email_error_lines[:20]) + \
+                       f"\n\n(Danh sách quá dài, vui lòng mở file CSV đính kèm để xem đầy đủ cột Link và Video URL)"
+        log("⚠️ Đang gửi email cảnh báo lỗi...")
 
     msg.attach(MIMEText(body_content, 'plain'))
     
@@ -290,12 +312,12 @@ def send_email_report(total_issues_count, channel_name, crash_message=None):
         server.login(EMAIL_USER, EMAIL_PASS)
         server.send_message(msg)
         server.quit()
-        print(">> Đã gửi email thành công!")
+        print(">> Đã gửi email kèm file CSV thành công!")
     except Exception as e:
         print(f"Lỗi không gửi được email: {e}")
 
 def main():
-    log("=== BẮT ĐẦU QUÉT (GỌN GÀNG + ĐÍNH KÈM LOG) ===")
+    log("=== BẮT ĐẦU QUÉT (CHẾ ĐỘ XUẤT BÁO CÁO EXCEL) ===")
     start_time = time.time()
     total_issues_count = 0
     current_channel_name = "Unknown Channel"
@@ -309,12 +331,7 @@ def main():
         except Exception: pass
 
         # QUÉT KÊNH
-        channel_issues = audit_channel_info(CHANNEL_ID)
-        if channel_issues:
-            total_issues_count += 1
-            log(f"❌ CẢNH BÁO TẠI THÔNG TIN KÊNH:", is_error=True)
-            for issue in channel_issues: log(issue, is_error=True)
-            log("-" * 20, is_error=True)
+        audit_channel_info(CHANNEL_ID)
 
         # QUÉT VIDEO
         videos = get_long_videos(CHANNEL_ID)
@@ -323,41 +340,33 @@ def main():
         
         for index, video in enumerate(videos):
             vid_id = video['id']
-            # Chỉ log tiến trình vào full log (console), KHÔNG vào email body
-            log(f"[{index+1}/{len(videos)}] {video['title']}")
+            # Console Log giờ sẽ hiện cả Link video cho bạn dễ copy nếu cần gấp
+            log(f"[{index+1}/{len(videos)}] {video['title']} (https://youtu.be/{vid_id})")
             
-            vid_issues = []
-            vid_issues.extend(audit_text_links_parallel(vid_id, video['desc'], "Mô tả"))
-            vid_issues.extend(audit_end_screens_smart(vid_id))
+            # Check Link
+            audit_text_links_parallel(vid_id, video['title'], video['desc'], "Mô tả")
+            audit_end_screens_smart(vid_id, video['title'])
             
             try:
                 cmt_req = youtube.commentThreads().list(videoId=vid_id, part='snippet', maxResults=10, order='relevance', textFormat='plainText')
                 cmt_res = cmt_req.execute()
                 for item in cmt_res.get('items', []):
                     cmt_text = item['snippet']['topLevelComment']['snippet']['textDisplay']
-                    vid_issues.extend(audit_text_links_parallel(vid_id, cmt_text, "Bình luận"))
+                    audit_text_links_parallel(vid_id, video['title'], cmt_text, "Bình luận")
             except: pass
-
-            if vid_issues:
-                total_issues_count += 1
-                # Khi có lỗi, ta bật cờ is_error=True để nó ghi vào Email Body
-                log(f"❌ CẢNH BÁO TẠI: https://youtu.be/{vid_id}", is_error=True)
-                for issue in vid_issues: log(issue, is_error=True)
-                log("-" * 20, is_error=True)
             
-            # time.sleep(0.5)
-
+        # Tính tổng lỗi
+        total_issues_count = STATS['links_error'] + STATS['endscreen_issues']
+        
         elapsed = round(time.time() - start_time, 2)
         log(f"=== HOÀN TẤT TRONG {elapsed} GIÂY ===")
         
-        send_email_report(total_issues_count, current_channel_name)
+        send_email_with_csv(total_issues_count, current_channel_name)
 
     except Exception as e:
         error_msg = traceback.format_exc()
         print("GẶP LỖI NGHIÊM TRỌNG:", error_msg)
-        # Ghi lỗi crash vào full log để lưu file
-        full_log_lines.append(error_msg)
-        send_email_report(0, current_channel_name, crash_message=error_msg)
+        send_email_with_csv(0, current_channel_name, crash_message=error_msg)
 
 if __name__ == "__main__":
     main()
