@@ -2,8 +2,8 @@ name: Audit Kênh 1 - Tự Học Forex
 
 on:
   schedule:
-    # 15h00 VN = 08h00 UTC
-    - cron: '0 8 * * *'
+    # 16h23 VN = 08h00 UTC
+    - cron: '23 9 * * *'
   workflow_dispatch: # Cho phép chạy tay
 
 jobs:
