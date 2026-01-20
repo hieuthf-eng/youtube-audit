@@ -25,6 +25,15 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 youtube = build('youtube', 'v3', developerKey=API_KEY)
 report_lines = []
 
+# --- BIẾN TOÀN CỤC ĐỂ THỐNG KÊ ---
+STATS = {
+    "videos_scanned": 0,
+    "total_links_found": 0,
+    "links_ok": 0,
+    "links_error": 0,
+    "endscreen_issues": 0
+}
+
 # --- CẤU HÌNH LOGIC CHECK LINK ---
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
@@ -58,7 +67,7 @@ def is_tracking_link(url):
 
 def check_single_link(url):
     """Hàm kiểm tra 1 link cụ thể, dùng cho ThreadPool"""
-    if any(d in url for d in ['youtube.com', 'youtu.be', 'google.com']): return None # Bỏ qua link nội bộ
+    if any(d in url for d in ['youtube.com', 'youtu.be', 'google.com']): return "INTERNAL" # Link nội bộ, không tính là outlink check
     
     import random
     headers = {
@@ -68,10 +77,7 @@ def check_single_link(url):
         'Upgrade-Insecure-Requests': '1'
     }
     try:
-        # Giảm timeout xuống 10s để chạy nhanh hơn
         response = requests.get(url, headers=headers, timeout=10, verify=False, stream=True)
-        
-        # Chỉ lấy 5KB đầu tiên để check title, tiết kiệm băng thông
         content_snippet = ""
         try:
             for chunk in response.iter_content(chunk_size=1024):
@@ -82,7 +88,7 @@ def check_single_link(url):
         code = response.status_code
         has_title = '<title' in content_snippet.lower()
 
-        if 200 <= code < 400: return None # Link tốt, return None
+        if 200 <= code < 400: return None # OK
         
         # Xử lý Anti-Bot
         if code in [400, 403, 406, 429, 503, 999, 401]:
@@ -101,40 +107,33 @@ def audit_text_links_parallel(video_id, text, source_type):
     urls = re.findall(r'(https?://\S+)', text)
     cleaned_urls = list(set([u.rstrip('.,;)"\'') for u in urls]))
     
-    if not cleaned_urls: return []
+    # Lọc bỏ link youtube nội bộ để đếm cho chính xác số outlink thực tế
+    external_links = [u for u in cleaned_urls if not any(d in u for d in ['youtube.com', 'youtu.be', 'google.com'])]
+
+    if not external_links: 
+        return []
+
+    # LOG THÔNG BÁO CHO NGƯỜI DÙNG BIẾT LÀ CÓ LINK
+    log(f"   > [{source_type}] Phát hiện {len(external_links)} link ngoài. Đang kiểm tra...")
+    STATS["total_links_found"] += len(external_links)
 
     issues = []
-    # Sử dụng tối đa 5 luồng song song để check link -> Tăng tốc độ 5 lần
+    # Sử dụng tối đa 5 luồng song song
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_url = {executor.submit(check_single_link, url): url for url in cleaned_urls}
+        future_to_url = {executor.submit(check_single_link, url): url for url in external_links}
         for future in concurrent.futures.as_completed(future_to_url):
             result = future.result()
-            if result: # Nếu có lỗi trả về
+            if result == "INTERNAL":
+                continue
+            elif result: # Có lỗi
                 issues.append(f"   [{source_type}] {result}")
+                STATS["links_error"] += 1
+            else: # Không có lỗi (None)
+                STATS["links_ok"] += 1
     
     return issues
 
-# --- MODULE MỚI: QUÉT THÔNG TIN KÊNH (ABOUT) ---
-def audit_channel_info(channel_id):
-    log(">> Đang kiểm tra thông tin Kênh (About Section)...")
-    issues = []
-    try:
-        response = youtube.channels().list(id=channel_id, part='snippet').execute()
-        if not response['items']: return []
-        
-        item = response['items'][0]
-        description = item['snippet']['description']
-        
-        # Check link trong mô tả kênh
-        link_issues = audit_text_links_parallel("CHANNEL_HOME", description, "Mô tả Kênh")
-        issues.extend(link_issues)
-        
-    except Exception as e:
-        log(f"Lỗi khi quét kênh: {e}")
-        
-    return issues
-
-# --- MODULE 2: QUÉT MÀN HÌNH KẾT THÚC (AN TOÀN HƠN) ---
+# --- MODULE 2: QUÉT MÀN HÌNH KẾT THÚC ---
 def audit_end_screens_smart(video_id):
     url = f"https://www.youtube.com/watch?v={video_id}"
     issues = []
@@ -143,18 +142,13 @@ def audit_end_screens_smart(video_id):
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         response = requests.get(url, headers=headers, timeout=10)
         html = response.text
-        
         match = re.search(r'var ytInitialPlayerResponse\s*=\s*({.+?});', html)
         if not match: return []
 
         try:
             data = json.loads(match.group(1))
-        except json.JSONDecodeError:
-            return [] # Bỏ qua nếu lỗi parsing JSON (tránh crash)
-
-        try:
             end_screen_elements = data['endscreen']['endScreenRenderer']['elements']
-        except KeyError:
+        except (KeyError, json.JSONDecodeError, AttributeError):
             return []
 
         for el in end_screen_elements:
@@ -167,8 +161,7 @@ def audit_end_screens_smart(video_id):
                     if 'videoId' in renderer:
                         target_id = renderer['videoId']
                         element_type = "Video cụ thể"
-                    else:
-                        continue 
+                    else: continue 
                 
                 elif 'endScreenPlaylistRenderer' in el:
                     renderer = el['endScreenPlaylistRenderer']
@@ -177,23 +170,38 @@ def audit_end_screens_smart(video_id):
                         element_type = "Danh sách phát"
 
                 if target_id:
-                    # Gọi API check xem video/playlist đích còn sống không
+                    # Gọi API check
                     if element_type == "Video cụ thể":
                         check_vid = youtube.videos().list(id=target_id, part='status').execute()
                         if not check_vid['items']:
                             issues.append(f"   [Màn hình kết thúc] Video gắn BỊ XÓA: {target_id}")
+                            STATS["endscreen_issues"] += 1
                     
                     elif element_type == "Danh sách phát":
                         check_pl = youtube.playlists().list(id=target_id, part='status').execute()
                         if not check_pl['items']:
                             issues.append(f"   [Màn hình kết thúc] Playlist gắn BỊ XÓA: {target_id}")
+                            STATS["endscreen_issues"] += 1
 
             except Exception: continue
 
     except Exception: pass
     return issues
 
-# --- MAIN ---
+# --- MODULE 0: QUÉT THÔNG TIN KÊNH ---
+def audit_channel_info(channel_id):
+    log(">> Đang kiểm tra thông tin Kênh (About Section)...")
+    issues = []
+    try:
+        response = youtube.channels().list(id=channel_id, part='snippet').execute()
+        if not response['items']: return []
+        item = response['items'][0]
+        description = item['snippet']['description']
+        issues.extend(audit_text_links_parallel("CHANNEL_HOME", description, "Mô tả Kênh"))
+    except Exception as e:
+        log(f"Lỗi khi quét kênh: {e}")
+    return issues
+
 def get_long_videos(channel_id):
     long_videos = []
     try:
@@ -210,40 +218,47 @@ def get_long_videos(channel_id):
             video_ids = [item['contentDetails']['videoId'] for item in pl_response['items']]
             
             if video_ids:
-                # Gom nhóm 50 video để lấy duration (Batch Request)
                 vid_request = youtube.videos().list(id=','.join(video_ids), part='snippet,contentDetails')
                 vid_response = vid_request.execute()
                 for item in vid_response['items']:
                     duration = parse_duration(item['contentDetails']['duration'])
                     if duration <= 125: continue # Lọc Shorts
-                    
                     long_videos.append({'id': item['id'], 'title': item['snippet']['title'], 'desc': item['snippet']['description']})
             
             next_page_token = pl_response.get('nextPageToken')
             if not next_page_token: break
     except Exception as e:
         log(f"Lỗi khi lấy danh sách video: {e}")
-        
     return long_videos
 
-def send_email_report(error_count, channel_name, crash_message=None):
+def send_email_report(total_issues, channel_name, crash_message=None):
     msg = MIMEMultipart()
     msg['From'] = EMAIL_USER
     msg['To'] = EMAIL_TO
     
-    # --- LOGIC TIÊU ĐỀ EMAIL CÓ TÊN KÊNH ---
+    # --- TẠO BẢNG THỐNG KÊ (DASHBOARD) ---
+    summary_block = (
+        f"=== THỐNG KÊ TỔNG QUAN KÊNH {channel_name} ===\n"
+        f"- Tổng video đã quét: {STATS['videos_scanned']}\n"
+        f"- Tổng Outlink tìm thấy: {STATS['total_links_found']}\n"
+        f"- Link hoạt động tốt (OK): {STATS['links_ok']}\n"
+        f"- Link lỗi/Chết (Error): {STATS['links_error']}\n"
+        f"- Lỗi màn hình kết thúc: {STATS['endscreen_issues']}\n"
+        f"======================================\n\n"
+    )
+
     if crash_message:
         msg['Subject'] = f"[{channel_name}] ❌ LỖI NGHIÊM TRỌNG - Script dừng đột ngột"
-        body_content = f"Hệ thống gặp lỗi nghiêm trọng trên kênh {channel_name}:\n\n{crash_message}\n\n=== LOG HOẠT ĐỘNG ===\n" + "\n".join(report_lines)
+        body_content = f"Hệ thống gặp lỗi nghiêm trọng:\n{crash_message}\n\n{summary_block}=== LOG HOẠT ĐỘNG ===\n" + "\n".join(report_lines)
     
-    elif error_count == 0:
-        msg['Subject'] = f"[{channel_name}] ✅ Báo cáo Sạch - Không có lỗi"
-        body_content = f"Kênh: {channel_name}\nTrạng thái: Tốt (Không có lỗi).\n\n=== LOG HOẠT ĐỘNG ===\n" + "\n".join(report_lines)
+    elif total_issues == 0:
+        msg['Subject'] = f"[{channel_name}] ✅ Kênh Sạch ({STATS['total_links_found']} links OK)"
+        body_content = f"{summary_block}Hệ thống đã chạy xong và KHÔNG phát hiện lỗi nào.\n\n=== LOG HOẠT ĐỘNG ===\n" + "\n".join(report_lines)
         log("✅ Đang gửi email báo cáo (Kênh sạch)...")
     
     else:
-        msg['Subject'] = f"[{channel_name}] ⚠️ CẢNH BÁO - {error_count} lỗi cần xử lý"
-        body_content = f"Kênh: {channel_name}\nPhát hiện: {error_count} vấn đề.\n\n=== CHI TIẾT LOG HOẠT ĐỘNG ===\n" + "\n".join(report_lines)
+        msg['Subject'] = f"[{channel_name}] ⚠️ CẢNH BÁO - {total_issues} lỗi cần xử lý"
+        body_content = f"{summary_block}Chi tiết các lỗi được liệt kê bên dưới:\n\n=== CHI TIẾT LOG HOẠT ĐỘNG ===\n" + "\n".join(report_lines)
         log("⚠️ Đang gửi email cảnh báo lỗi...")
 
     msg.attach(MIMEText(body_content, 'plain'))
@@ -259,49 +274,46 @@ def send_email_report(error_count, channel_name, crash_message=None):
         print(f"Lỗi không gửi được email: {e}")
 
 def main():
-    log("=== BẮT ĐẦU QUÉT ===")
+    log("=== BẮT ĐẦU QUÉT (FULL REPORT) ===")
     start_time = time.time()
-    error_count = 0
-    current_channel_name = "Unknown Channel" # Giá trị mặc định
+    total_issues_count = 0
+    current_channel_name = "Unknown Channel"
     
     try:
-        # LẤY TÊN KÊNH (Để gửi email cho đúng)
+        # LẤY TÊN KÊNH
         try:
             ch_info = youtube.channels().list(id=CHANNEL_ID, part='snippet').execute()
             if ch_info['items']:
                 current_channel_name = ch_info['items'][0]['snippet']['title']
-                log(f"Đang làm việc trên kênh: {current_channel_name}")
-            else:
-                log(f"Không tìm thấy tên kênh cho ID: {CHANNEL_ID}")
-        except Exception as e:
-            log(f"Lỗi lấy tên kênh: {e}")
+                log(f"Kênh mục tiêu: {current_channel_name}")
+        except Exception: pass
 
-        # BƯỚC 1: QUÉT THÔNG TIN KÊNH
+        # BƯỚC 1: QUÉT KÊNH
         channel_issues = audit_channel_info(CHANNEL_ID)
         if channel_issues:
-            error_count += 1
+            total_issues_count += 1
             log(f"❌ CẢNH BÁO TẠI THÔNG TIN KÊNH:")
             for issue in channel_issues: log(issue)
             log("-" * 20)
-        else:
-            log("✅ Thông tin Kênh: OK")
 
         # BƯỚC 2: QUÉT VIDEO
         videos = get_long_videos(CHANNEL_ID)
-        log(f"Tổng số video dài cần quét: {len(videos)} video.")
+        STATS['videos_scanned'] = len(videos)
+        log(f"Tổng số video dài: {len(videos)}")
         
         for index, video in enumerate(videos):
             vid_id = video['id']
             log(f"[{index+1}/{len(videos)}] {video['title']}")
             vid_issues = []
             
-            # Check Link Mô tả (Đa luồng)
+            # Check Link
             vid_issues.extend(audit_text_links_parallel(vid_id, video['desc'], "Mô tả"))
             
-            # Check Màn hình kết thúc
-            vid_issues.extend(audit_end_screens_smart(vid_id))
+            # Check End Screen
+            es_issues = audit_end_screens_smart(vid_id)
+            vid_issues.extend(es_issues)
             
-            # Check Comment (Lấy 10 comment nổi bật nhất)
+            # Check Comment
             try:
                 cmt_req = youtube.commentThreads().list(videoId=vid_id, part='snippet', maxResults=10, order='relevance', textFormat='plainText')
                 cmt_res = cmt_req.execute()
@@ -311,26 +323,21 @@ def main():
             except: pass
 
             if vid_issues:
-                error_count += 1
+                total_issues_count += 1
                 log(f"❌ CẢNH BÁO TẠI: https://youtu.be/{vid_id}")
                 for issue in vid_issues: log(issue)
                 log("-" * 20)
             
-            # Nghỉ nhẹ 1s
             time.sleep(1)
 
-        # Tổng kết thời gian
         elapsed = round(time.time() - start_time, 2)
         log(f"=== HOÀN TẤT TRONG {elapsed} GIÂY ===")
         
-        # Gửi báo cáo kết quả (Kèm tên kênh)
-        send_email_report(error_count, current_channel_name)
+        send_email_report(total_issues_count, current_channel_name)
 
     except Exception as e:
-        # Bắt toàn bộ lỗi crash
         error_msg = traceback.format_exc()
         print("GẶP LỖI NGHIÊM TRỌNG:", error_msg)
-        # Gửi mail báo lỗi kèm tên kênh (nếu đã lấy được)
         send_email_report(0, current_channel_name, crash_message=error_msg)
 
 if __name__ == "__main__":
