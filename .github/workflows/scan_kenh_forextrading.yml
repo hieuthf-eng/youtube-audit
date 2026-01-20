@@ -2,8 +2,8 @@ name: Audit Kênh 3 - Forex Trading
 
 on:
   schedule:
-    # 15h00 VN = 08h00 UTC
-    - cron: '0 8 * * *'
+    # 17h02 VN = 10h02 UTC
+    - cron: '2 10 * * *'
   workflow_dispatch: # Cho phép chạy tay
 
 jobs:
