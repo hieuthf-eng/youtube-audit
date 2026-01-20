@@ -1,0 +1,39 @@
+name: Audit Kênh 2 - EX Trading
+
+on:
+  schedule:
+    # 15h00 VN = 08h00 UTC
+    - cron: '0 8 * * *'
+  workflow_dispatch: # Cho phép chạy tay
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Audit Script
+        env:
+          # Các biến này lấy từ Secret (DÙNG CHUNG)
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          
+          # --- QUAN TRỌNG: ĐIỀN ID KÊNH RIÊNG TẠI ĐÂY ---
+          # Thay dòng ${{ secrets.CHANNEL_ID }} bằng ID cụ thể
+          # Ví dụ ID kênh Exness:
+          CHANNEL_ID: 'UCEEyNLVtb9Z9uUKRHJvg5-w' 
+          
+        run: python main.py
