@@ -114,6 +114,26 @@ def audit_text_links_parallel(video_id, text, source_type):
     
     return issues
 
+# --- MODULE MỚI: QUÉT THÔNG TIN KÊNH (ABOUT) ---
+def audit_channel_info(channel_id):
+    log(">> Đang kiểm tra thông tin Kênh (About Section)...")
+    issues = []
+    try:
+        response = youtube.channels().list(id=channel_id, part='snippet').execute()
+        if not response['items']: return []
+        
+        item = response['items'][0]
+        description = item['snippet']['description']
+        
+        # Check link trong mô tả kênh
+        link_issues = audit_text_links_parallel("CHANNEL_HOME", description, "Mô tả Kênh")
+        issues.extend(link_issues)
+        
+    except Exception as e:
+        log(f"Lỗi khi quét kênh: {e}")
+        
+    return issues
+
 # --- MODULE 2: QUÉT MÀN HÌNH KẾT THÚC (AN TOÀN HƠN) ---
 def audit_end_screens_smart(video_id):
     url = f"https://www.youtube.com/watch?v={video_id}"
@@ -206,24 +226,24 @@ def get_long_videos(channel_id):
         
     return long_videos
 
-def send_email_report(error_count, crash_message=None):
+def send_email_report(error_count, channel_name, crash_message=None):
     msg = MIMEMultipart()
     msg['From'] = EMAIL_USER
     msg['To'] = EMAIL_TO
     
-    # --- LOGIC TIÊU ĐỀ EMAIL (ĐÃ CẢI TIẾN) ---
+    # --- LOGIC TIÊU ĐỀ EMAIL CÓ TÊN KÊNH ---
     if crash_message:
-        msg['Subject'] = "[LỖI NGHIÊM TRỌNG] Script bị dừng đột ngột"
-        body_content = f"Hệ thống gặp lỗi nghiêm trọng:\n\n{crash_message}\n\n=== LOG HOẠT ĐỘNG ===\n" + "\n".join(report_lines)
+        msg['Subject'] = f"[{channel_name}] ❌ LỖI NGHIÊM TRỌNG - Script dừng đột ngột"
+        body_content = f"Hệ thống gặp lỗi nghiêm trọng trên kênh {channel_name}:\n\n{crash_message}\n\n=== LOG HOẠT ĐỘNG ===\n" + "\n".join(report_lines)
     
     elif error_count == 0:
-        msg['Subject'] = f"[OK] Kênh Sạch - Đã quét xong (Log: {len(report_lines)} dòng)"
-        body_content = "Hệ thống đã chạy xong và KHÔNG phát hiện lỗi nào.\nKênh của bạn đang ở trạng thái tốt.\n\n=== LOG HOẠT ĐỘNG ===\n" + "\n".join(report_lines)
+        msg['Subject'] = f"[{channel_name}] ✅ Báo cáo Sạch - Không có lỗi"
+        body_content = f"Kênh: {channel_name}\nTrạng thái: Tốt (Không có lỗi).\n\n=== LOG HOẠT ĐỘNG ===\n" + "\n".join(report_lines)
         log("✅ Đang gửi email báo cáo (Kênh sạch)...")
     
     else:
-        msg['Subject'] = f"[CẢNH BÁO] Có {error_count} vấn đề cần xử lý ngay"
-        body_content = f"Tìm thấy {error_count} lỗi.\n\n=== CHI TIẾT LOG HOẠT ĐỘNG ===\n" + "\n".join(report_lines)
+        msg['Subject'] = f"[{channel_name}] ⚠️ CẢNH BÁO - {error_count} lỗi cần xử lý"
+        body_content = f"Kênh: {channel_name}\nPhát hiện: {error_count} vấn đề.\n\n=== CHI TIẾT LOG HOẠT ĐỘNG ===\n" + "\n".join(report_lines)
         log("⚠️ Đang gửi email cảnh báo lỗi...")
 
     msg.attach(MIMEText(body_content, 'plain'))
@@ -239,26 +259,49 @@ def send_email_report(error_count, crash_message=None):
         print(f"Lỗi không gửi được email: {e}")
 
 def main():
-    log("=== BẮT ĐẦU QUÉT (PHIÊN BẢN TỐI ƯU GITHUB ACTIONS) ===")
+    log("=== BẮT ĐẦU QUÉT ===")
     start_time = time.time()
+    error_count = 0
+    current_channel_name = "Unknown Channel" # Giá trị mặc định
     
     try:
+        # LẤY TÊN KÊNH (Để gửi email cho đúng)
+        try:
+            ch_info = youtube.channels().list(id=CHANNEL_ID, part='snippet').execute()
+            if ch_info['items']:
+                current_channel_name = ch_info['items'][0]['snippet']['title']
+                log(f"Đang làm việc trên kênh: {current_channel_name}")
+            else:
+                log(f"Không tìm thấy tên kênh cho ID: {CHANNEL_ID}")
+        except Exception as e:
+            log(f"Lỗi lấy tên kênh: {e}")
+
+        # BƯỚC 1: QUÉT THÔNG TIN KÊNH
+        channel_issues = audit_channel_info(CHANNEL_ID)
+        if channel_issues:
+            error_count += 1
+            log(f"❌ CẢNH BÁO TẠI THÔNG TIN KÊNH:")
+            for issue in channel_issues: log(issue)
+            log("-" * 20)
+        else:
+            log("✅ Thông tin Kênh: OK")
+
+        # BƯỚC 2: QUÉT VIDEO
         videos = get_long_videos(CHANNEL_ID)
         log(f"Tổng số video dài cần quét: {len(videos)} video.")
-        error_count = 0
         
         for index, video in enumerate(videos):
             vid_id = video['id']
             log(f"[{index+1}/{len(videos)}] {video['title']}")
             vid_issues = []
             
-            # 1. Check Link Mô tả (Đa luồng)
+            # Check Link Mô tả (Đa luồng)
             vid_issues.extend(audit_text_links_parallel(vid_id, video['desc'], "Mô tả"))
             
-            # 2. Check Màn hình kết thúc
+            # Check Màn hình kết thúc
             vid_issues.extend(audit_end_screens_smart(vid_id))
             
-            # 3. Check Comment (Lấy 10 comment nổi bật nhất)
+            # Check Comment (Lấy 10 comment nổi bật nhất)
             try:
                 cmt_req = youtube.commentThreads().list(videoId=vid_id, part='snippet', maxResults=10, order='relevance', textFormat='plainText')
                 cmt_res = cmt_req.execute()
@@ -273,21 +316,22 @@ def main():
                 for issue in vid_issues: log(issue)
                 log("-" * 20)
             
-            # Nghỉ nhẹ 1s sau mỗi video để bảo vệ IP khỏi bị ban
+            # Nghỉ nhẹ 1s
             time.sleep(1)
 
         # Tổng kết thời gian
         elapsed = round(time.time() - start_time, 2)
         log(f"=== HOÀN TẤT TRONG {elapsed} GIÂY ===")
         
-        # Gửi báo cáo kết quả (Dù không có lỗi cũng gửi)
-        send_email_report(error_count)
+        # Gửi báo cáo kết quả (Kèm tên kênh)
+        send_email_report(error_count, current_channel_name)
 
     except Exception as e:
         # Bắt toàn bộ lỗi crash
         error_msg = traceback.format_exc()
         print("GẶP LỖI NGHIÊM TRỌNG:", error_msg)
-        send_email_report(0, crash_message=error_msg)
+        # Gửi mail báo lỗi kèm tên kênh (nếu đã lấy được)
+        send_email_report(0, current_channel_name, crash_message=error_msg)
 
 if __name__ == "__main__":
     main()
