@@ -2,10 +2,9 @@ name: Audit Kênh 5 - IB Support
 
 on:
   schedule:
-    # 17h42 VN = 10h42 UTC
+    # 17h42 VN = 10h40 UTC
     - cron: '42 10 * * *'
-  
-  workflow_dispatch: # Cho phép bấm nút chạy tay để test
+  workflow_dispatch: # Cho phép chạy tay
 
 jobs:
   audit:
@@ -26,9 +25,15 @@ jobs:
 
       - name: Run Audit Script
         env:
+          # Các biến này lấy từ Secret (DÙNG CHUNG)
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
-          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          
+          # --- QUAN TRỌNG: ĐIỀN ID KÊNH RIÊNG TẠI ĐÂY ---
+          # Thay dòng ${{ secrets.CHANNEL_ID }} bằng ID cụ thể
+          # Ví dụ ID kênh Exness:
+          CHANNEL_ID: 'UCH7t29p04-lX8_wawKlZsfA' 
+          
         run: python main.py
