@@ -2,8 +2,8 @@ name: Audit Kênh 4 - Ex Markets
 
 on:
   schedule:
-    # 17h22 VN = 10h22 UTC
-    - cron: '22 10 * * *'
+    # 09h02 VN = 02h02 UTC
+    - cron: '2 2 * * 1'
   workflow_dispatch: # Cho phép chạy tay
 
 jobs:
