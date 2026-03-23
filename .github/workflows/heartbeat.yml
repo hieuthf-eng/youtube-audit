@@ -1,0 +1,16 @@
+# Job này giúp duy trì hoạt động cho Repo để GitHub không tắt Workflow
+    keep_alive:
+      runs-on: ubuntu-latest
+      permissions:
+        contents: write
+      steps:
+        - uses: actions/checkout@v4
+        
+        - name: Keep repository active
+          run: |
+            git config --global user.name "GitHub Action"
+            git config --global user.email "action@github.com"
+            echo "Last run: $(date)" > heartbeat.txt
+            git add heartbeat.txt
+            git commit -m "Keep-alive: Update heartbeat $(date)" || exit 0
+            git push
