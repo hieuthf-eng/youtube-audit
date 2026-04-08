@@ -1,9 +1,9 @@
-name: Audit Kênh 6 - Trading Crypto
+name: Audit Kênh 9 - Crypto Việt
 
 on:
   schedule:
-    # 09h42 VN = 02h42 UTC
-    - cron: '42 2 * * 1'
+    # 10h42 VN = 03h42 UTC
+    - cron: '42 3 * * 1'
   workflow_dispatch: # Cho phép chạy tay
 
 jobs:
@@ -34,6 +34,6 @@ jobs:
           # --- QUAN TRỌNG: ĐIỀN ID KÊNH RIÊNG TẠI ĐÂY ---
           # Thay dòng ${{ secrets.CHANNEL_ID }} bằng ID cụ thể
           # Ví dụ ID kênh Exness:
-          CHANNEL_ID: 'UCjr4oH-505dLHDDr4w8zU0Q' 
+          CHANNEL_ID: 'UCF57xsTrbSZAyp9i_USA_uQ' 
           
         run: python main.py
