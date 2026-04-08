@@ -2,7 +2,7 @@ name: Audit Kênh 8 - Crypto Trading
 
 on:
   schedule:
-    # 10h22 VN = 03h02 UTC
+    # 10h22 VN = 03h22 UTC
     - cron: '22 3 * * 1'
   workflow_dispatch: # Cho phép chạy tay
 
