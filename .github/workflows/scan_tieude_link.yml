@@ -1,8 +1,6 @@
 name: Get Video List
 
 on:
-  schedule:
-    - cron: '02 1 * * 1' # 8h02 sáng thứ Hai VN
   workflow_dispatch:
 
 jobs:
