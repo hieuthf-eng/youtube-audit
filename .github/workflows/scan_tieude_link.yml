@@ -1,0 +1,33 @@
+name: Get Video List
+
+on:
+  schedule:
+    - cron: '02 1 * * 1' # 8h02 sáng thứ Hai VN
+  workflow_dispatch:
+
+jobs:
+  extract_list:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install google-api-python-client # Bạn chỉ cần thư viện này là đủ cho bản mới
+          # Nếu có file requirements.txt thì dùng: pip install -r requirements.txt
+
+      - name: Run Script
+        env:
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          CHANNEL_ID: 'UCvJjRAQ-1f_MN5WCTmYZLYg'
+        run: python get_tieude_link.py
