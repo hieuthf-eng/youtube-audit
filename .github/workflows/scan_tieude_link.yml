@@ -29,5 +29,5 @@ jobs:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
-          CHANNEL_ID: 'UCFMjLmHL7wskF6HkK0GQOUw'
+          CHANNEL_ID: 'UCH7t29p04-lX8_wawKlZsfA'
         run: python get_tieude_link.py
