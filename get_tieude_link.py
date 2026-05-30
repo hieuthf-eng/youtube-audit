@@ -16,17 +16,17 @@ EMAIL_USER = os.environ.get('EMAIL_USER')
 EMAIL_PASS = os.environ.get('EMAIL_PASS')
 EMAIL_TO = os.environ.get('EMAIL_TO')
 
-# Khởi tạo YouTube Data API v3 bằng API_KEY (Hoàn toàn công khai, không lo lỗi OAuth2)
 youtube = build('youtube', 'v3', developerKey=API_KEY)
 
-# --- KHAI BÁO BIẾN DỮ LIỆU ---
+# --- CẤU TRÚC CSV CẬP NHẬT MỚI (ĐÃ TÁCH NGÀY/GIỜ & ĐỔI PHÚT GIÂY) ---
 CSV_DATA = []
 CSV_HEADER = [
     'STT', 
     'Tiêu đề Video', 
     'URL Video', 
-    'Thời lượng (giây)', 
-    'Ngày xuất bản', 
+    'Thời lượng',       # Sẽ hiển thị dạng "X phút Y giây"
+    'Ngày đăng',        # Tách riêng biệt
+    'Giờ đăng',         # Tách riêng biệt
     'Thẻ Tags', 
     'Lượt xem', 
     'Lượt thích', 
@@ -37,6 +37,7 @@ def log(message):
     print(message, flush=True)
 
 def parse_duration(duration_str):
+    """Đổi định dạng ISO 8601 của YouTube sang tổng số giây"""
     match = re.match(r'PT(\d+H)?(\d+M)?(\d+S)?', duration_str)
     if not match: return 0
     hours = int(match.group(1)[:-1]) if match.group(1) else 0
@@ -44,18 +45,41 @@ def parse_duration(duration_str):
     seconds = int(match.group(3)[:-1]) if match.group(3) else 0
     return (hours * 3600) + (minutes * 60) + seconds
 
+def format_duration_vietnamese(total_seconds):
+    """Chuyển đổi tổng số giây sang định dạng 'X phút Y giây'"""
+    minutes = total_seconds // 60
+    seconds = total_seconds % 60
+    if minutes > 0:
+        return f"{minutes} phút {seconds} giây"
+    return f"{seconds} giây"
+
+def parse_datetime(iso_date_str):
+    """
+    Tách chuỗi định dạng '2026-05-19T10:19:07Z' thành (Ngày, Giờ).
+    Nếu lỗi hoặc trống, trả về giá trị mặc định.
+    """
+    if not iso_date_str:
+        return "N/A", "N/A"
+    try:
+        # Sử dụng Regex tách đoạn trước và sau ký tự 'T'
+        match = re.match(r'(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})', iso_date_str)
+        if match:
+            return match.group(1), match.group(2)
+    except Exception:
+        pass
+    return iso_date_str, ""
+
 def get_all_long_videos(channel_id):
     videos_list = []
     try:
-        # Lấy Playlist ID của các video đã tải lên từ contentDetails
         ch_response = youtube.channels().list(id=channel_id, part='contentDetails').execute()
         if not ch_response['items']: 
-            log("Không tìm thấy thông tin kênh với ID đã cung cấp.")
+            log("Không tìm thấy thông tin kênh.")
             return []
         uploads_playlist_id = ch_response['items'][0]['contentDetails']['relatedPlaylists']['uploads']
         
         next_page_token = None
-        log("Đang quét danh sách video và thu thập dữ liệu công khai từ YouTube...")
+        log("Đang quét danh sách video và định dạng lại cấu trúc dữ liệu...")
         
         while True:
             pl_request = youtube.playlistItems().list(
@@ -68,7 +92,6 @@ def get_all_long_videos(channel_id):
             video_ids = [item['contentDetails']['videoId'] for item in pl_response['items']]
             
             if video_ids:
-                # Gọi API videos().list để lấy chi tiết snippet, contentDetails và statistics công khai
                 vid_request = youtube.videos().list(
                     id=','.join(video_ids), 
                     part='snippet,contentDetails,statistics'
@@ -76,22 +99,28 @@ def get_all_long_videos(channel_id):
                 vid_response = vid_request.execute()
                 
                 for item in vid_response['items']:
-                    duration = parse_duration(item['contentDetails']['duration'])
+                    raw_duration = parse_duration(item['contentDetails']['duration'])
                     
                     # LỌC VIDEO DÀI (> 125 giây)
-                    if duration > 125:
+                    if raw_duration > 125:
                         snippet = item['snippet']
                         stats = item.get('statistics', {})
                         
-                        # Chuyển mảng tags thành chuỗi text phân cách bằng dấu phẩy
+                        # 1. Đổi thời lượng sang: X phút Y giây
+                        friendly_duration = format_duration_vietnamese(raw_duration)
+                        
+                        # 2. Tách chuỗi Ngày xuất bản ra làm 2 phần
+                        published_date, published_time = parse_datetime(snippet.get('publishedAt', ''))
+                        
                         tags_list = snippet.get('tags', [])
                         tags_str = ", ".join(tags_list) if tags_list else ""
                         
                         videos_list.append({
                             'title': snippet['title'],
                             'url': f"https://www.youtube.com/watch?v={item['id']}",
-                            'duration': duration,
-                            'published_at': snippet.get('publishedAt', ''),
+                            'duration': friendly_duration,
+                            'date': published_date,
+                            'time': published_time,
                             'tags': tags_str,
                             'views': int(stats.get('viewCount', 0)),
                             'likes': int(stats.get('likeCount', 0)),
@@ -104,31 +133,31 @@ def get_all_long_videos(channel_id):
             
         return videos_list
     except Exception as e:
-        log(f"Lỗi khi lấy dữ liệu từ YouTube: {e}")
+        log(f"Lỗi khi lấy dữ liệu: {e}")
         return []
 
 def send_email_with_csv(channel_name, video_count):
     msg = MIMEMultipart()
     msg['From'] = EMAIL_USER
     msg['To'] = EMAIL_TO
-    msg['Subject'] = f"[{channel_name}] Báo cáo dữ liệu {video_count} video công khai"
+    msg['Subject'] = f"[{channel_name}] Báo cáo tối ưu {video_count} video công khai"
 
-    # Tạo file CSV với mã hóa utf-8-sig để tránh lỗi font tiếng Việt khi mở trực tiếp trên Excel
+    # Lưu dữ liệu với cấu trúc CSV mới
     csv_buffer = io.StringIO()
     csv_writer = csv.writer(csv_buffer)
     csv_writer.writerow(CSV_HEADER)
     csv_writer.writerows(CSV_DATA)
     csv_bytes = csv_buffer.getvalue().encode('utf-8-sig')
     
-    filename = f"Du_lieu_video_cong_khai_{channel_name.replace(' ', '_')}.csv"
+    filename = f"Du_lieu_video_toi_uu_{channel_name.replace(' ', '_')}.csv"
     attachment = MIMEApplication(csv_bytes, Name=filename)
     attachment['Content-Disposition'] = f'attachment; filename="{filename}"'
     msg.attach(attachment)
 
-    body = (f"Chào bạn,\n\nGửi bạn tệp báo cáo tổng hợp dữ liệu công khai của các video dài (>125s) "
-            f"trên kênh {channel_name}.\n"
-            f"Tổng cộng tìm thấy: {video_count} video.\n\n"
-            f"Báo cáo bao gồm: Tiêu đề, URL, Thời lượng, Ngày đăng, Thẻ Tags, Lượt xem, Lượt thích và Bình luận.")
+    body = (f"Chào bạn,\n\nGửi bạn file báo cáo đã được tối ưu hiển thị theo yêu cầu:\n"
+            f"- Cột Thời lượng đã được chuyển thành định dạng dễ đọc (X phút Y giây).\n"
+            f"- Khung thời gian xuất bản đã được tách biệt hẳn thành 2 cột: 'Ngày đăng' và 'Giờ đăng' để tiện phân tích.\n\n"
+            f"Tổng số lượng video lọc được: {video_count} video.")
     
     msg.attach(MIMEText(body, 'plain', 'utf-8'))
 
@@ -138,15 +167,14 @@ def send_email_with_csv(channel_name, video_count):
         server.login(EMAIL_USER, EMAIL_PASS)
         server.send_message(msg)
         server.quit()
-        log(">> Đã gửi email báo cáo thành công!")
+        log(">> Đã gửi email báo cáo định dạng mới thành công!")
     except Exception as e:
         log(f"Lỗi gửi email: {e}")
 
 def main():
-    log("=== KHỞI CHẠY QUÉT DỮ LIỆU VIDEO CÔNG KHAI ===")
+    log("=== KHỞI CHẠY QUÉT VÀ ĐỊNH DẠNG LẠI DỮ LIỆU ===")
     start_time = time.time()
     
-    # Lấy tên chính xác của kênh
     channel_name = "Unknown Channel"
     try:
         ch_info = youtube.channels().list(id=CHANNEL_ID, part='snippet').execute()
@@ -162,7 +190,8 @@ def main():
             v['title'], 
             v['url'], 
             v['duration'],
-            v['published_at'],
+            v['date'],
+            v['time'],
             v['tags'],
             v['views'],
             v['likes'],
@@ -172,7 +201,7 @@ def main():
     if CSV_DATA:
         send_email_with_csv(channel_name, len(videos))
     else:
-        log("Không tìm thấy video nào thỏa mãn điều kiện.")
+        log("Không tìm thấy dữ liệu video phù hợp.")
 
     elapsed = round(time.time() - start_time, 2)
     log(f"=== HOÀN TẤT TRONG {elapsed} GIÂY ===")
