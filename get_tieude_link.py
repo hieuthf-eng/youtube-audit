@@ -11,7 +11,7 @@ from googleapiclient.discovery import build
 
 # --- CẤU HÌNH ---
 API_KEY = os.environ.get('YOUTUBE_API_KEY')
-CHANNEL_ID = "UCEEyNLVtb9Z9uUKRHJvg5-w"
+CHANNEL_ID = "UCFMjLmHL7wskF6HkK0GQOUw"
 EMAIL_USER = os.environ.get('EMAIL_USER')
 EMAIL_PASS = os.environ.get('EMAIL_PASS')
 EMAIL_TO = os.environ.get('EMAIL_TO')
