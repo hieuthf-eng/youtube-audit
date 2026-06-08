@@ -18,7 +18,7 @@ EMAIL_TO = os.environ.get('EMAIL_TO')
 
 youtube = build('youtube', 'v3', developerKey=API_KEY)
 
-# --- CẤU TRÚC CSV CẬP NHẬT MỚI (ĐÃ TÁCH NGÀY/GIỜ & ĐỔI PHÚT GIÂY) ---
+# --- CẤU TRÚC CSV CẬP NHẬT MỚI (ĐÃ BỔ SUNG CỘT MÔ TẢ) ---
 CSV_DATA = []
 CSV_HEADER = [
     'STT', 
@@ -27,6 +27,7 @@ CSV_HEADER = [
     'Thời lượng',       # Sẽ hiển thị dạng "X phút Y giây"
     'Ngày đăng',        # Tách riêng biệt
     'Giờ đăng',         # Tách riêng biệt
+    'Mô tả',            # <--- CỘT MỚI BỔ SUNG
     'Thẻ Tags', 
     'Lượt xem', 
     'Lượt thích', 
@@ -115,12 +116,16 @@ def get_all_long_videos(channel_id):
                         tags_list = snippet.get('tags', [])
                         tags_str = ", ".join(tags_list) if tags_list else ""
                         
+                        # 3. Lấy mô tả video
+                        description_str = snippet.get('description', '')
+                        
                         videos_list.append({
                             'title': snippet['title'],
                             'url': f"https://www.youtube.com/watch?v={item['id']}",
                             'duration': friendly_duration,
                             'date': published_date,
                             'time': published_time,
+                            'description': description_str,  # <--- THÊM VÀO ĐÂY
                             'tags': tags_str,
                             'views': int(stats.get('viewCount', 0)),
                             'likes': int(stats.get('likeCount', 0)),
@@ -156,7 +161,8 @@ def send_email_with_csv(channel_name, video_count):
 
     body = (f"Chào bạn,\n\nGửi bạn file báo cáo đã được tối ưu hiển thị theo yêu cầu:\n"
             f"- Cột Thời lượng đã được chuyển thành định dạng dễ đọc (X phút Y giây).\n"
-            f"- Khung thời gian xuất bản đã được tách biệt hẳn thành 2 cột: 'Ngày đăng' và 'Giờ đăng' để tiện phân tích.\n\n"
+            f"- Khung thời gian xuất bản đã được tách biệt hẳn thành 2 cột: 'Ngày đăng' và 'Giờ đăng' để tiện phân tích.\n"
+            f"- Đã bổ sung thêm cột 'Mô tả' chi tiết cho từng video.\n\n"
             f"Tổng số lượng video lọc được: {video_count} video.")
     
     msg.attach(MIMEText(body, 'plain', 'utf-8'))
@@ -192,6 +198,7 @@ def main():
             v['duration'],
             v['date'],
             v['time'],
+            v['description'], # <--- ĐƯA DỮ LIỆU MÔ TẢ VÀO ĐÚNG VỊ TRÍ CỦA HEADER
             v['tags'],
             v['views'],
             v['likes'],
