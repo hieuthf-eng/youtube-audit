@@ -1,9 +1,6 @@
 name: Audit Kênh 2 - EX Trading
 
 on:
-  schedule:
-    # 08h22 VN = 01h22 UTC
-    - cron: '22 1 * * 1'
   workflow_dispatch: # Cho phép chạy tay
 
 jobs:
