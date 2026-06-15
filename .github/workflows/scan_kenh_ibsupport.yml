@@ -1,9 +1,6 @@
 name: Audit Kênh 5 - IB Support
 
 on:
-  schedule:
-    # 09h22 VN = 02h22 UTC
-    - cron: '22 2 * * 1'
   workflow_dispatch: # Cho phép chạy tay
 
 jobs:
