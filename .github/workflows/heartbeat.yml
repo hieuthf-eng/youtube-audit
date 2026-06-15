@@ -1,9 +1,6 @@
 name: Keep Alive
 
 on:
-  schedule:
-    # Chạy vào 00:00 mỗi Chủ Nhật hàng tuần (đảm bảo luôn có activity)
-    - cron: '0 0 * * 0'
   workflow_dispatch: # Cho phép bạn nhấn nút chạy thủ công để kiểm tra
 
 jobs:
